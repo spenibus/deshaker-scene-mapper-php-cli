@@ -13,3 +13,5 @@ Example output:
       http://spenibus.net/f/g/5X/render-000980.jpg
    orginal, 4396x3591, 3.12 Mio
       http://spenibus.net/f/g/5Y/render-000990.jpg
+   timelapse video of the process
+      https://www.youtube.com/watch?v=XyGpY4SzF6U
