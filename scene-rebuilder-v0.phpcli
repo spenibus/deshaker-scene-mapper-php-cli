@@ -1,0 +1,511 @@
+<?php
+/*******************************************************************************
+spelunky visual level recomposer
+
+creation: 2014-01-29
+  update: 2014-01-30
+
+notes
+ - this script is meant to be run in CLI
+ - this script uses virtualdub/deshaker for panning data
+   http://virtualdub.org/
+   http://www.guthspot.se/video/deshaker.htm
+ - zoom only applies at the end, all work is done at native resolution to preserve quality
+
+todo
+ - support resume
+ - optimized mode, only process frames that are adding data
+ - option to only output final composite
+ - hud crop smoothing
+*******************************************************************************/
+
+
+echo "
+*** init ***";
+
+error_reporting(E_ALL);
+
+# this is memory hungry
+ini_set('memory_limit', '512M');
+
+$dirSource = './src/';
+$dirRender = './render/';
+
+
+
+
+$files = array();
+$d = opendir($dirSource);
+while(false !== $f = readdir($d)) {
+   if(substr($f,-4) == '.png') {
+      $files[] = $f;
+   }
+}
+closedir($d);
+sort($files);
+
+
+
+
+foreach($files as $id=>$file) {
+
+   $filePrev = $files[$id-1];
+
+
+   if(!is_file($dirSource.$file) || !is_file($dirSource.$filePrev)) {
+      continue;
+   }
+
+
+   $top = imagecreatefrompng($dirSource.$file);
+   imagealphablending($top, true);
+   imagesavealpha($top, true);
+   imagecolortransparent($top, imagecolorexact($top,0,0,0));
+
+
+   $w = imagesx($top);
+   $h = imagesy($top);
+
+
+   $bottom = is_file($dirRender.$filePrev)
+      ? imagecreatefrompng($dirRender.$filePrev)
+      : imagecreatefrompng($dirSource.$filePrev);
+
+
+   imagealphablending($bottom, true);
+   imagesavealpha($bottom, true);
+
+
+   # copy frame to composite
+   imagecopymerge($bottom, $top,
+      0, 0,
+      0, 0,
+      $w, $h,
+      100
+   );
+
+
+   // save composite
+   imagepng($bottom, $dirRender.$file);
+
+
+   // free memory
+   imagedestroy($bottom);
+   imagedestroy($top);
+
+
+   echo "\n$file   $filePrev";
+}
+
+
+
+
+
+
+
+function edgeSmooth($img, $size) {
+
+   $w = imagesx($img);
+   $h = imagesy($img);
+
+   # smooth top edge
+   $o = 0;
+   for($y=0; $y<$size; $y++) {
+      $opacityFactor = ++$o / ($size + 1);
+      for($x=0; $x<$w; $x++) {
+         pixelSetOpacity($img, $x, $y, $opacityFactor);
+      }
+   }
+
+   # smooth bottom edge
+   $o = 0;
+   for($y=$h-1; $y>$h-1-$size; $y--) {
+      $opacityFactor = ++$o / ($size + 1);
+      for($x=0; $x<$w; $x++) {
+         pixelSetOpacity($img, $x, $y, $opacityFactor);
+      }
+   }
+
+   # smooth left edge
+   $o = 0;
+   for($x=0; $x<$size; $x++) {
+      $opacityFactor = ++$o / ($size + 1);
+      for($y=0; $y<$h; $y++) {
+         pixelSetOpacity($img, $x, $y, $opacityFactor);
+      }
+   }
+
+   # smooth right edge
+   $o = 0;
+   for($x=$w-1; $x>$w-1-$size; $x--) {
+      $opacityFactor = ++$o / ($size + 1);
+      for($y=0; $y<$h; $y++) {
+         pixelSetOpacity($img, $x, $y, $opacityFactor);
+      }
+   }
+
+   return $img;
+}
+
+
+
+
+function pixelSetOpacity(&$img, $x, $y, $o) {
+
+   $oldColor = imagecolorat($img, $x, $y);
+
+   $a = ($oldColor >> 24) & 0xFF;
+   $r = ($oldColor >> 16) & 0xFF;
+   $g = ($oldColor >> 8) & 0xFF;
+   $b = $oldColor & 0xFF;
+
+   // current pixel opacity factor
+   $opacity = (127-$a)/127;
+
+   // new pixel opacity factor
+   $opacity = $opacity * $o;
+
+   // new pixel opacity
+   $opacity = round(127 - ($opacity*127) );
+
+   $newColor = imagecolorallocatealpha($img, $r, $g, $b, $opacity);
+
+   imagesetpixel($img, $x, $y, $newColor);
+}
+
+
+
+
+
+
+
+
+/********************************************************************* config *
+error_reporting(!E_NOTICE);
+
+# this is memory hungry
+ini_set('memory_limit', '512M');
+
+# directories
+$dirSource = 'raw/';
+$dirRender = 'render/';
+
+# source frame dimensions
+$sourceW = 1920;
+$sourceH = 1080;
+
+# smooth the edges of source frames
+$sourceEdgeSmooth = 20;
+
+# frames to process (123456.png)
+$frameStart = 0;
+$frameEnd   = 999999;
+
+# render resize options (use only one)
+//$renderTargetZoom   = 0.3523; # zoom factor 0.0 - 1.0
+//$renderTargetWidth  = 800; # max width
+//$renderTargetHeight = 480; # max height
+
+# render background color (rgba)
+$renderBackground = array(255,0,255,127);
+
+# hud crop
+$hudCropEnable = true;
+
+# hud crop values (percentages expressed as factors)
+$hudX = 0;
+$hudY = 0.0555;
+$hudW = 0.2708;
+$hudH = 0.2314;
+
+
+
+/******************************************************************************
+# $o: opacity: 0.0 - 1.0
+function pixelSetOpacity(&$img, $x, $y, $o) {
+
+   $oldColor = imagecolorat($img, $x, $y);
+
+   $a = ($oldColor >> 24) & 0xFF;
+   $r = ($oldColor >> 16) & 0xFF;
+   $g = ($oldColor >> 8) & 0xFF;
+   $b = $oldColor & 0xFF;
+
+   // current pixel opacity factor
+   $opacity = (127-$a)/127;
+
+   // new pixel opacity factor
+   $opacity = $opacity * $o;
+
+   // new pixel opacity
+   $opacity = round(127 - ($opacity*127) );
+
+   $newColor = imagecolorallocatealpha($img, $r, $g, $b, $opacity);
+
+   imagesetpixel($img, $x, $y, $newColor);
+}
+
+
+
+
+/********************************************************* parse deshaker log *
+$panX = $panY = $panXcur = $panYcur = $panXmin = $panXmax = $panYmin = $panYmax = 0;
+
+$deshaker[0] = array();
+
+$log = file('raw.log');
+
+foreach($log as $row) {
+
+   $col = explode("\t", $row);
+
+   $frame = trim($col[0]);
+   $panX  = round(trim($col[1]));
+   $panY  = round(trim($col[2]));
+
+   $deshaker[$frame] = array(
+      'panX' => $panX,
+      'panY' => $panY,
+   );
+
+   # panning values relative to start
+   $panXcur += $panX;
+   $panYcur += $panY;
+
+   # max panning values relative to start
+   if($panXcur < $panXmin) {
+      $panXmin = $panXcur;
+   }
+   if($panXcur > $panXmax) {
+      $panXmax = $panXcur;
+   }
+   if($panYcur < $panYmin) {
+      $panYmin = $panYcur;
+   }
+   if($panYcur > $panYmax) {
+      $panYmax = $panYcur;
+   }
+}
+ksort($deshaker);
+
+echo "
+***
+log parsed | x: $panXmin/$panXmax y: $panYmin/$panYmax";
+
+
+
+
+/******************************************************** build the composite *
+
+# check render dir, create if necessary
+if(!is_dir($dirRender)) {
+   mkdir($dirRender);
+}
+
+
+# hud crop values
+$hudCropX  = round($hudX * $sourceW);
+$hudCropY  = round($hudY * $sourceH);
+$hudCropX2 = round($hudW * $sourceW) + $hudCropX - 1;
+$hudCropY2 = round($hudH * $sourceH) + $hudCropY - 1;
+
+
+# composite resolution
+$compositeW = $sourceW+abs($panXmin)+abs($panXmax); // frame width + panning correction
+$compositeH = $sourceH+abs($panYmin)+abs($panYmax); // frame height + panning correction
+
+
+# render resolution
+# option: zoom
+if($renderTargetZoom) {
+   $renderW = round($compositeW*$renderTargetZoom);
+   $renderH = round($compositeH*$renderTargetZoom);
+   $renderTargetMethod = "zoom ($renderTargetZoom)";
+}
+# option: width
+elseif($renderTargetWidth) {
+   $renderW = round($renderTargetWidth);
+   $renderH = round( ($compositeH/$compositeW) * $renderTargetWidth );
+   $renderTargetMethod = "width ($renderTargetWidth)";
+}
+# option: height
+elseif($renderTargetHeight) {
+   $renderW = round( ($compositeW/$compositeH) * $renderTargetHeight );
+   $renderH = round($renderTargetHeight);
+   $renderTargetMethod = "height ($renderTargetHeight)";
+}
+else {
+   $renderW = $compositeW;
+   $renderH = $compositeH;
+   $renderTargetMethod = "native";
+}
+
+
+echo "
+***
+composite resolution: $compositeW x $compositeH
+   render resolution: $renderW x $renderH | method: $renderTargetMethod
+      edge smoothing: $sourceEdgeSmooth";
+
+
+# origin point for first frame
+$copyX = abs($panXmin);
+$copyY = abs($panYmin);
+
+
+# create composite img
+$composite = imagecreatetruecolor($compositeW, $compositeH);
+imagealphablending($composite, false);
+imagesavealpha($composite, true);
+
+
+# composite background
+imagefill($composite, 0, 0, imagecolorallocatealpha($composite,
+   $renderBackground[0],
+   $renderBackground[1],
+   $renderBackground[2],
+   $renderBackground[3]
+));
+
+
+
+
+#**************************************************************** process frames
+$panX = $panY = 0;
+foreach($deshaker as $i=>$frameData) {
+
+   $exec = microtime(true);
+
+   $frame = sprintf('%06d', $i);
+
+   $panX = $panX + $frameData['panX'];
+   $panY = $panY + $frameData['panY'];
+
+   if($i < $frameStart || $i > $frameEnd) {
+      continue;
+   }
+
+   $fileSource = $dirSource.$frame.'.png';
+
+   if(!file_exists($fileSource)) {
+      continue;
+   }
+
+   # load source
+   $imageSource = imagecreatefrompng($fileSource);
+   imagealphablending($imageSource, false);
+   imagesavealpha($imageSource, true);
+
+   # starting point
+   $startX = $copyX+$panX;
+   $startY = $copyY+$panY;
+
+
+
+
+
+   # crop hud if enabled
+   if($hudCropEnable) {
+      imagefilledrectangle($imageSource,
+         $hudCropX, $hudCropY,
+         $hudCropX2, $hudCropY2,
+         imagecolorallocatealpha($composite, 0, 0, 0, 127)
+      );
+   }
+
+
+
+
+
+
+
+   # smooth top edge
+   $o = 0;
+   for($y=0; $y<$sourceEdgeSmooth; $y++) {
+      $opacityFactor = ++$o / ($sourceEdgeSmooth + 1);
+      for($x=0; $x<$sourceW; $x++) {
+         pixelSetOpacity($imageSource, $x, $y, $opacityFactor);
+      }
+   }
+
+   # smooth bottom edge
+   $o = 0;
+   for($y=$sourceH-1; $y>$sourceH-1-$sourceEdgeSmooth; $y--) {
+      $opacityFactor = ++$o / ($sourceEdgeSmooth + 1);
+      for($x=0; $x<$sourceW; $x++) {
+         pixelSetOpacity($imageSource, $x, $y, $opacityFactor);
+      }
+   }
+
+   # smooth left edge
+   $o = 0;
+   for($x=0; $x<$sourceEdgeSmooth; $x++) {
+      $opacityFactor = ++$o / ($sourceEdgeSmooth + 1);
+      for($y=0; $y<$sourceH; $y++) {
+         pixelSetOpacity($imageSource, $x, $y, $opacityFactor);
+      }
+   }
+
+   # smooth right edge
+   $o = 0;
+   for($x=$sourceW-1; $x>$sourceW-1-$sourceEdgeSmooth; $x--) {
+      $opacityFactor = ++$o / ($sourceEdgeSmooth + 1);
+      for($y=0; $y<$sourceH; $y++) {
+         pixelSetOpacity($imageSource, $x, $y, $opacityFactor);
+      }
+   }
+
+
+   # copy frame to composite
+   imagealphablending($composite, true);
+   imagecopyresampled($composite, $imageSource,
+      $startX, $startY,
+      0, 0,
+      $sourceW, $sourceH,
+      $sourceW, $sourceH
+   );
+
+   # free memory
+   imagedestroy($imageSource);
+
+
+   # set render data
+   $render = $composite;
+
+
+   # apply zoom before rendering if not 100%
+   if($renderTargetZoom != 1) {
+
+      # create render
+      $render = imagecreatetruecolor($renderW, $renderH);
+      imagealphablending($render, false);
+      imagesavealpha($render, true);
+
+      # transparent bg
+      imagefill($render, 0, 0, imagecolorallocatealpha($render,0,0,0,127));
+
+      # copy resize
+      imagecopyresampled($render, $composite,
+         0, 0,
+         0, 0,
+         $renderW, $renderH,
+         $compositeW, $compositeH
+      );
+   }
+
+   # save composite
+   imagepng($render, $dirRender.$frame.'.png');
+
+   $exec = round((microtime(true)-$exec)*1000);
+
+   echo "
+processed frame $frame | exec: ".sprintf('%6d', $exec)." ms";
+}
+
+
+echo "
+***
+*** press enter to exit ***";
+fgets(STDIN);
+*/
+?>

@@ -1,0 +1,342 @@
+<?php
+/*******************************************************************************
+deshaker scene mapper
+creation: 2014-12-03 19:40 +0000
+  update: 2014-12-04 02:26 +0000
+
+supports only panning, not rotation or zoom
+
+TODO
+   apply mask to smooth borders
+   apply mask to ignore dark areas ? range ?
+   optimize, ignore frames when affected area is fully rendered already
+   optimize, keep ffmpeg open, frame serving ?
+   optimize ffmpeg cmd line
+   optimize: read ffmpeg output as buffers, never close, loop through frames
+   remove hud
+*******************************************************************************/
+
+
+
+
+echo "
+********************************************************************************
+******************************************************** deshaker scene mapper *
+********************************************************************************
+";
+
+
+
+
+/******************************************************************************/
+error_reporting(E_ALL);
+
+set_time_limit(0);
+
+ini_set('memory_limit', '512M'); // this is memory hungry
+
+$FFMPEG   = 'F:/progs/ffmpeg/x64/bin/ffmpeg.exe';
+$VIDEO    = 'F:/files/capture/_fraps/test-002/Spelunky 2014-01-30 21-07-28-90.avi';
+$DESHAKER = './Deshaker2.log';
+$ZOOM     = .465; // factor
+
+
+
+/******************************************************************************/
+function run($cmd, &$out, &$ret) {
+   $out = $ret = null;
+   exec($cmd, $out, $ret);
+}
+
+
+
+
+/******************************************************************************/
+function frameGet($frameNumber=0, $frameZoom=1) {
+
+   global $FFMPEG, $VIDEO;
+
+   $cmd = "\"$FFMPEG\""
+      ." -r 1"
+      ." -i \"$VIDEO\""
+      ." -ss $frameNumber"
+      ." -t 1"
+      ." -vf scale=iw*$frameZoom:-1"
+      ." -vframes 1"
+      ." -vcodec png"
+      ." -f image2pipe"
+      ." -";
+      //." -f rawvideo"
+      //." -vcodec rawvideo"
+      //." -pixel_format rgb24"
+
+
+   $descriptorspec = array(
+      0 => array("pipe", "r"), // stdin is a pipe that the child will read from
+      1 => array("pipe", "w"), // stdout is a pipe that the child will write to
+      2 => array("pipe", "a")  // stderr
+   );
+
+
+   $handle = proc_open($cmd, $descriptorspec, $pipes, null, null, array('bypass_shell'=>true));
+
+
+   $buffer = null;
+
+
+   if(is_resource($handle)) {
+      $buffer = stream_get_contents($pipes[1]);
+   }
+
+
+   fclose($pipes[0]);
+   fclose($pipes[1]);
+   fclose($pipes[2]);
+   proc_close($handle);
+
+
+   return $buffer;
+}
+
+
+
+
+/******************************************************************************/
+function deshakerLogParser($file) {
+
+   $lines = explode("\r\n", file_get_contents($file));
+
+
+   $out = array(
+      'panXmin' => 0,
+      'panXmax' => 0,
+      'panYmin' => 0,
+      'panYmax' => 0,
+      'frames'  => array(),
+   );
+
+
+   // init, panning
+   $panX = $panY = $panXLocal = $panYLocal = 0;
+
+
+   foreach($lines as $line) {
+
+      $column = explode("\t", $line);
+      $column = array_map('floatval', $column);
+
+
+      if($column[0] == null) {
+         continue;
+      }
+
+
+      $panXLocal  = $column[1];
+      $panYLocal  = $column[2];
+      $panX      += $panXLocal;
+      $panY      += $panYLocal;
+
+
+      // frame data
+      $out['frames'][$column[0]] = array(
+         'panXLocal' => $panXLocal,
+         'panYLocal' => $panYLocal,
+         'panX'      => $panX,
+         'panY'      => $panY,
+      );
+
+
+      // max values
+      if($panX < $out['panXmin']) {
+         $out['panXmin'] = $panX;
+      }
+      if($panX > $out['panXmax']) {
+         $out['panXmax'] = $panX;
+      }
+      if($panY < $out['panYmin']) {
+         $out['panYmin'] = $panY;
+      }
+      if($panY > $out['panYmax']) {
+         $out['panYmax'] = $panY;
+      }
+   }
+
+
+   // establish starting point
+   $out['startX'] = 0 - $out['panXmin'];
+   $out['startY'] = 0 - $out['panYmin'];
+
+
+   ksort($out['frames']);
+
+
+   return $out;
+}
+
+
+
+
+/******************************************************************************/
+$data = deshakerLogParser($DESHAKER);
+
+
+echo "
+log parsed | x: {$data['panXmin']}/{$data['panXmax']} | y: {$data['panYmin']}/{$data['panYmax']}";
+
+
+// get first frame
+$frame = imagecreatefromstring(frameGet(0));
+
+
+// frames dimensions, original
+$frameWOriginal = imagesx($frame);
+$frameHOriginal = imagesy($frame);
+
+
+// frames dimensions, apply zoom, round
+$frameW = round($frameWOriginal * $ZOOM);
+$frameH = round($frameHOriginal * $ZOOM);
+
+
+// composite dimensions, apply zoom, round
+$compositeW = round(($frameWOriginal + abs($data['panXmin']) + abs($data['panXmax'])) * $ZOOM);
+$compositeH = round(($frameHOriginal + abs($data['panYmin']) + abs($data['panYmax'])) * $ZOOM);
+
+//$compositeW = round(($frameWOriginal + max(abs($data['panXmin']), $data['panXmax'])) * $ZOOM);
+//$compositeH = round(($frameHOriginal + max(abs($data['panYmin']), $data['panYmax'])) * $ZOOM);
+
+
+
+
+echo "
+                zoom: ".($ZOOM*100)."%
+    frame dimensions: $frameW x $frameH
+composite dimensions: $compositeW x $compositeH";
+
+
+$composite = imagecreatetruecolor($compositeW, $compositeH);
+imagealphablending($composite, false);
+imagesavealpha($composite, true);
+imagefilledrectangle(
+   $composite, 0, 0, $compositeW-1, $compositeH-1,
+   imagecolorallocatealpha($composite, 255, 0, 255, 127)
+);
+
+
+// add initial frame data
+$data['frames'][0] = array(
+   'panXLocal' => 0,
+   'panYLocal' => 0,
+   'panX'      => 0,
+   'panY'      => 0,
+);
+
+
+// sort frames
+ksort($data['frames']);
+
+
+// init, edges of processed area
+// because the frames have straight border, we can easily deduce which part of
+// the composite have been rendered already, allowing us to skip redundant frames
+// this is relative to start position
+$edge = array(
+   'left'   => 0,
+   'right'  => 0,
+   'top'    => 0,
+   'bottom' => 0,
+);
+
+
+// init to process first frame
+$edgesReached = 4;
+
+
+// get last frame number
+end($data['frames']);
+$frameLast = key($data['frames']);
+
+
+// process frames
+foreach($data['frames'] as $i=>$frameData) {
+
+   $frameTime = microtime(true);
+
+
+   echo sprintf("\nframe %06d of %06d | %3d%%", $i, $frameLast, ceil($i/$frameLast*100));
+
+
+   // frame position, apply zoom, round
+   $frameX = round(($data['startX'] + $frameData['panX']) * $ZOOM);
+   $frameY = round(($data['startY'] + $frameData['panY']) * $ZOOM);
+
+
+   echo " | panning: $frameX/$frameY";
+
+
+   // update edges, pixel precision, finer detail is invisible
+   if($frameX < $edge['left']) {
+      $edge['left'] = $frameX;
+      ++$edgesReached;
+   }
+   if($frameX > $edge['right']) {
+      $edge['right'] = $frameX;
+      ++$edgesReached;
+   }
+   if($frameY < $edge['top']) {
+      $edge['top'] = $frameY;
+      ++$edgesReached;
+   }
+   if($frameY > $edge['bottom']) {
+      $edge['top'] = $frameY;
+      ++$edgesReached;
+   }
+
+
+/* BAD BAD BAD REWRITE
+we could pre process data to use only relevant frames
+a sort of path optimization
+use best positions to use least amount of frames
+
+   // if frame is withign edges, skip
+   if($edgesReached == 0) {
+      echo " | frame within boundaries,  skipped";
+      continue;
+   }
+*/
+
+
+   // reset
+   $edgesReached = 0;
+
+
+   // get frame
+   $frame = imagecreatefromstring(frameGet($i, $ZOOM));
+
+
+   // overlay new frame on composite, trim edges
+   imagecopy(
+      $composite, $frame,
+      $frameX+2, $frameY+2,
+      2, 2,
+      $frameW-4, $frameH-4
+   );
+
+
+   // destroy frame
+   imagedestroy($frame);
+
+
+   // save render
+   if($i%10 == 0 || !is_array($data['frames'][$i+1])) {
+      imagepng($composite, "render-".sprintf('%06d', $i).".png");
+   }
+   //imagejpeg($composite, "render-".sprintf('%06d', $i).".jpg", 90);
+
+
+   $frameTime = round((microtime(true) - $frameTime) * 1000);
+
+
+   echo sprintf(' | runtime: %s ms', $frameTime);
+}
+?>

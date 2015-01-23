@@ -1,0 +1,470 @@
+<?php
+/*******************************************************************************
+deshaker scene mapper
+creation: 2014-12-03 19:40 +0000
+  update: 2014-12-04 02:26 +0000
+
+supports only panning, not rotation or zoom
+
+TODO
+   - apply mask to smooth borders
+   - apply mask to ignore dark areas ? range ?
+   - optimize, ignore frames when affected area is fully rendered already
+   - optimize ffmpeg cmd line
+   - optimize ffmpeg output parsing
+
+   - support resume
+   - optimized mode, only process frames that are adding data
+   - option to only output final composite
+   - hud crop smoothing
+
+   - optimize loop workflow
+
+   - spelunky options
+      - remove hud
+*******************************************************************************/
+
+
+
+
+echo "
+********************************************************************************
+******************************************************** deshaker scene mapper *
+********************************************************************************
+";
+
+
+
+
+/******************************************************************************/
+error_reporting(E_ALL);
+
+set_time_limit(0);
+
+ini_set('memory_limit', '512M'); // this can be memory hungry
+
+$CFG_PATH_FFMPEG  = 'F:/progs/ffmpeg/x64/bin/ffmpeg.exe';
+$CFG_PATH_FFPROBE = 'F:/progs/ffmpeg/x64/bin/ffprobe.exe';
+$CFG_PATH_VIDEO   = 'F:/files/capture/_fraps/test-002/level-1-3.avi';
+$CFG_PATH_LOG     = 'F:/files/capture/_fraps/test-002/level-1-3.log';
+$CFG_PATH_RENDER  = 'F:/files/capture/_fraps/test-002/render/';
+$CFG_ZOOM         = 0.1; // factor
+$CFG_CROP         = 2; // number of pixels based on source frame resolution
+
+
+
+/******************************************************************************/
+function deshakerLogParser($file) {
+
+   global $CFG_ZOOM;
+
+   $lines = explode("\r\n", file_get_contents($file));
+
+   $out = array(
+      'panXmin' => 0,
+      'panXmax' => 0,
+      'panYmin' => 0,
+      'panYmax' => 0,
+      'frames'  => array(),
+   );
+
+
+   // first frame
+   $out['frames'][0] = array(
+      'panXLocal' => 0,
+      'panYLocal' => 0,
+      'panX'      => 0,
+      'panY'      => 0,
+      'posX'      => 0,
+      'posY'      => 0,
+   );
+
+
+   // init, panning
+   $panX = $panY = $panXLocal = $panYLocal = 0;
+
+
+   foreach($lines as $line) {
+
+      $column = explode("\t", $line);
+      $column = array_map('floatval', $column);
+
+
+      if($column[0] == null) {
+         continue;
+      }
+
+
+      $panXLocal  = $column[1];
+      $panYLocal  = $column[2];
+      $panX      += $panXLocal;
+      $panY      += $panYLocal;
+
+
+      // frame data
+      $out['frames'][$column[0]] = array(
+         // amount of panning relative to last frame
+         'panXLocal' => $panXLocal,
+         'panYLocal' => $panYLocal,
+         // amount of panning relative to first frame, max precision
+         'panX' => $panX,
+         'panY' => $panY,
+      );
+
+
+      // max values
+      if($panX < $out['panXmin']) {
+         $out['panXmin'] = $panX;
+      }
+      if($panX > $out['panXmax']) {
+         $out['panXmax'] = $panX;
+      }
+      if($panY < $out['panYmin']) {
+         $out['panYmin'] = $panY;
+      }
+      if($panY > $out['panYmax']) {
+         $out['panYmax'] = $panY;
+      }
+   }
+
+
+   // establish starting point
+   $out['startX'] = 0 - $out['panXmin'];
+   $out['startY'] = 0 - $out['panYmin'];
+
+
+   // extra data
+   $prevX = $prevY = 0;
+   foreach($out['frames'] as &$frameData) {
+
+      // position of frame within composite, rounded to pixel precision
+      $frameData['posX'] = round(($out['startX'] + $frameData['panX']) * $CFG_ZOOM);
+      $frameData['posY'] = round(($out['startY'] + $frameData['panY']) * $CFG_ZOOM);
+
+      // position of frame within composite relative to previous frame, pixel precision
+      $frameData['posXLocal'] = $frameData['posX'] - $prevX;
+      $frameData['posYLocal'] = $frameData['posY'] - $prevY;
+
+      $prevX = $frameData['posX'];
+      $prevY = $frameData['posY'];
+
+      unset($frameData);
+   }
+
+   // get last frame number
+   $out['frameLast'] = max(array_keys($out['frames']));
+
+
+   return $out;
+}
+
+
+
+
+/******************************************************************************/
+function processCreate($cmd) {
+
+   $handle = proc_open(
+      $cmd,
+      array(
+         0 => array("pipe", "r"),
+         1 => array("pipe", "w"),
+         2 => array("pipe", "r"), // possible issue: r mode seems to make fread hang on pipe[1]
+      ),
+      $pipes,
+      null,
+      null,
+      array(
+         'bypass_shell'=>true,
+         'binary_pipes'=>true
+      )
+   );
+
+   $pipes['handle'] = $handle;
+
+   return is_resource($handle) ? $pipes : false;
+}
+
+
+
+
+/******************************************************************************/
+function bufferGet(&$stream, $length=null) {
+
+   $buffer = null;
+
+   while(!feof($stream)) {
+
+      // length null, read until EOF
+      if($length == null) {
+         $buffer .= fread($stream, 32768);
+      }
+
+      // read up to length
+      else {
+
+         $buffer .= fread($stream, $length - strlen($buffer));
+
+         if(strlen($buffer) < $length) {
+            continue;
+         }
+         else {
+            break;
+         }
+      }
+   }
+
+   return $buffer;
+}
+
+
+
+
+/******************************************************************************/
+function frameGet(&$buffer, &$stream) {
+
+   // build new frame, add header
+   $frame = bufferGet($stream, 8);
+
+
+   // not a png file
+   if(bin2hex($frame) != '89504e470d0a1a0a') {
+      exit("\nerror: not a png file");
+   }
+
+
+   // png chunks
+   while(true) {
+
+      // get chunk length + type
+      $buffer = bufferGet($stream, 8);
+
+      // chunk header data
+      $chunkHeader = unpack('Nlength/a4type', $buffer);
+
+      // get chunk data + crc
+      $buffer .= bufferGet($stream, $chunkHeader['length'] + 4);
+
+      // build frame, add chunk
+      $frame .= $buffer;
+
+      // reached last chunk, end of file
+      if($chunkHeader['type'] == 'IEND') {
+         break;
+      }
+   }
+
+
+   return $frame;
+}
+
+
+
+
+/******************************************************************************/
+
+
+// get log data
+$data = deshakerLogParser($CFG_PATH_LOG);
+
+
+echo "
+log parsed | x: {$data['panXmin']}/{$data['panXmax']} | y: {$data['panYmin']}/{$data['panYmax']}";
+
+
+// run ffprobe to get video info
+$pipe = processCreate(
+   "\"$CFG_PATH_FFPROBE\""
+      ." -i \"$CFG_PATH_VIDEO\""
+      ." -print_format json"
+      ."  -v quiet"
+      ." -show_streams"
+);
+
+
+$buffer    = bufferGet($pipe[1]);
+$frameInfo = json_decode($buffer, true);
+
+
+$frameCrop = round($CFG_CROP*$CFG_ZOOM);
+
+
+// frame dimensions, apply zoom, round up
+$frameW = round($frameInfo['streams'][0]['width']  * $CFG_ZOOM);
+$frameH = round($frameInfo['streams'][0]['height'] * $CFG_ZOOM);
+
+
+// composite dimensions, apply zoom, round up
+$compositeW = ceil($frameW + (abs($data['panXmin']) + abs($data['panXmax'])) * $CFG_ZOOM);
+$compositeH = ceil($frameH + (abs($data['panYmin']) + abs($data['panYmax'])) * $CFG_ZOOM);
+
+
+echo "
+                zoom: ".($CFG_ZOOM*100)."%
+    frame dimensions: $frameW x $frameH
+composite dimensions: $compositeW x $compositeH";
+
+
+// create composite
+$composite = imagecreatetruecolor($compositeW, $compositeH);
+imagealphablending($composite, false);
+imagesavealpha($composite, true);
+imagefilledrectangle(
+   $composite, 0, 0, $compositeW-1, $compositeH-1,
+   imagecolorallocatealpha($composite, 255, 0, 255, 127)
+);
+
+
+// run ffmpeg to grab frames
+$pipe = processCreate(
+   "\"$CFG_PATH_FFMPEG\""
+      ." -i \"$CFG_PATH_VIDEO\""
+      ." -vf scale=$frameW:$frameH"
+      ." -vcodec png"
+      ." -f image2pipe"
+      ." -"
+);
+
+
+// total frame processing runtime
+$frameTimeTotal = 0.0;
+
+
+// loop through frames
+for($frameNum=0; $frameNum<=$data['frameLast']; ++$frameNum) {
+
+
+   // frame processing runtime
+   $frameTime = microtime(true);
+
+
+   // display
+   echo sprintf(
+      "\nframe %'.6d of %'.6d | %'3d%%",
+      $frameNum,
+      $data['frameLast'],
+      ceil($frameNum/$data['frameLast']*100)
+   );
+
+
+   // load frame deshaker data
+   $frameData = $data['frames'][$frameNum];
+
+
+   // display
+   echo sprintf(
+      " | position: %s/%s",
+      $frameData['posXLocal'],
+      $frameData['posYLocal']
+   );
+
+
+   // init
+   $process = true;
+
+
+   // never skip first frame
+   if($frameNum == 0) {
+      // this is to make sure the first frame is processed
+   }
+
+
+   // skip frame if same position as previous frame
+   elseif($frameData['posXLocal'] == 0 && $frameData['posYLocal'] == 0) {
+      echo " | skip: same frame position";
+      $process = false;
+   }
+
+
+/***
+   placeholder for processed area detection
+   avoid areas already processed
+***/
+
+
+   // grab new frame from buffer
+   $frame = frameGet($buffer, $pipe[1]);
+
+
+   if($process) {
+
+      // create image from frame
+      $frameImg = imagecreatefromstring($frame);
+
+
+      // overlay new frame on composite, trim edges
+      imagecopy(
+         $composite, $frameImg,
+         $frameData['posX']+$frameCrop, $frameData['posY']+$frameCrop,
+         $frameCrop, $frameCrop,
+         $frameW-$frameCrop*2, $frameH-$frameCrop*2
+      );
+
+
+      // destroy frame
+      imagedestroy($frameImg);
+   }
+
+
+   // measure runtime
+   $frameTime       = round((microtime(true) - $frameTime) * 1000);
+   $frameTimeTotal += $frameTime;
+
+
+   // display
+   echo sprintf(
+      ' | runtime: %s ms, total: %s s',
+      $frameTime,
+      round($frameTimeTotal/1000,2)
+   );
+
+
+
+   // save render
+   if($frameNum%100 == 0 || $frameNum == $data['frameLast']) {
+      echo "\nsaving composite to disk";
+      imagepng($composite, sprintf($CFG_PATH_RENDER.'render-%06d.png', $frameNum));
+      //imagejpeg($composite, sprintf($CFG_PATH_RENDER.'render-%06d.jpg', $frameNum), 90);
+   }
+
+}
+
+
+exit("\ndone");
+
+
+
+
+/********************************************************************* code dump
+$compositeW = round(($frameWOriginal + max(abs($data['panXmin']), $data['panXmax'])) * $CFG_ZOOM);
+$compositeH = round(($frameHOriginal + max(abs($data['panYmin']), $data['panYmax'])) * $CFG_ZOOM);
+
+
+// init, edges of processed area
+// because the frames have straight border, we can easily deduce which part of
+// the composite have been rendered already, allowing us to skip redundant frames
+// this is relative to start position
+$edge = array(
+   'left'   => 0,
+   'right'  => 0,
+   'top'    => 0,
+   'bottom' => 0,
+);
+
+
+// init to process first frame
+$edgesReached = 4;
+
+
+// BAD BAD BAD REWRITE
+we could pre process data to use only relevant frames
+a sort of path optimization
+use best positions to use least amount of frames
+
+// if frame is within edges, skip
+if($edgesReached == 0) {
+   echo " | frame within boundaries,  skipped";
+   continue;
+}
+/******************************************************************************/
+?>
