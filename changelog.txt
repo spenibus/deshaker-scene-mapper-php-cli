@@ -1,2 +1,6 @@
+2015-01-23 14:53 +0000
+- updated readme with output example
+
+
 2015-01-23 14:45 +0000
 - initial commit for code preservation
