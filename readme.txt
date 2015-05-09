@@ -1,3 +1,7 @@
+deshaker-scene-mapper-php-cli
+http://spenibus.net
+
+
 This is an experiment.
 Its purpose is to reconstruct a scene from a video using a deshaker log.
 It was originally created to build an overview of spelunky levels.
