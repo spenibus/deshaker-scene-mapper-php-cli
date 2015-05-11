@@ -1,5 +1,7 @@
 deshaker-scene-mapper-php-cli
 http://spenibus.net
+https://github.com/spenibus/deshaker-scene-mapper-php-cli
+https://gitlab.com/spenibus/deshaker-scene-mapper-php-cli
 
 
 This is an experiment.
